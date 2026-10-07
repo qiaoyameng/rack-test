@@ -21,6 +21,7 @@ end
 require 'forwardable'
 
 require_relative 'test/cookie_jar'
+require_relative 'test/open_response'
 require_relative 'test/utils'
 require_relative 'test/methods'
 require_relative 'test/uploaded_file'
@@ -103,6 +104,7 @@ module Rack
         @default_host = default_host
         @last_request = nil
         @last_response = nil
+        @open_response = nil
         clear_cookies
       end
 
@@ -161,6 +163,58 @@ module Rack
         uri = parse_uri(uri, env)
         env = env_for(uri, env.merge(method: verb.to_s.upcase, params: params))
         process_request(uri, env, &block)
+      end
+
+      # Issue a request to the Rack app for the given URI and optional Rack
+      # environment, without buffering the response body. Returns a
+      # Rack::Test::OpenResponse from which the status and headers can be
+      # read immediately, while the body is consumed chunk by chunk via
+      # OpenResponse#read_chunk or OpenResponse#each_chunk. The response
+      # body does not need to be re-enumerable. Example:
+      #
+      #   open_response "/stream" do |response|
+      #     response.status.must_equal 200
+      #     response.each_chunk { |chunk| ... }
+      #   end
+      #
+      # Cookies from the response are merged into the session as soon as
+      # the response headers are available. after_request callbacks run
+      # exactly once, when the response is closed.
+      #
+      # If a block is given, the response is yielded to the block and
+      # closed automatically when the block exits, even if the block
+      # raises. Without a block, the caller is responsible for closing
+      # the returned response.
+      #
+      # Only one response can be open at a time per session. Attempting
+      # to open a response while a previous response is still open raises
+      # Rack::Test::Error, so an unclosed response never overwrites
+      # #last_response.
+      def open_response(uri, env = {})
+        if @open_response && !@open_response.closed?
+          raise Error, 'An open response already exists for this session. Close it before opening another.'
+        end
+
+        uri = parse_uri(uri, env)
+        env = env_for(uri, env)
+        env['HTTP_COOKIE'] ||= cookie_jar.for(uri)
+        @last_request = Rack::Request.new(env)
+        status, headers, body = @app.call(env).to_a
+        cookie_jar.merge(headers['set-cookie'], uri)
+
+        @open_response = @last_response = OpenResponse.new(status, headers, body) do
+          @after_request.each(&:call)
+        end
+
+        if block_given?
+          begin
+            yield @open_response
+          ensure
+            @open_response.close
+          end
+        end
+
+        @open_response
       end
 
       # Set a header to be included on all subsequent requests through the

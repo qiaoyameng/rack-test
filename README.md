@@ -105,6 +105,30 @@ class TestApp < Test::Unit::TestCase
 end
 ```
 
+To test long-lived streaming responses, use `open_response`, which does not
+buffer the response body. The status and headers are available as soon as the
+response is opened, and the body is consumed chunk by chunk. The response is
+closed automatically when the block exits, even if the block raises:
+
+```ruby
+class StreamTest < Test::Unit::TestCase
+  include Rack::Test::Methods
+
+  def app
+    lambda { |env| [200, {'content-type' => 'text/plain'}, ['chunk1', 'chunk2']] }
+  end
+
+  def test_stream
+    open_response '/stream' do |response|
+      assert_equal 200, response.status
+      assert_equal 'chunk1', response.read_chunk
+      assert_equal 'chunk2', response.read_chunk
+      assert_nil response.read_chunk
+    end
+  end
+end
+```
+
 ## Install
 
 To install the latest release as a gem:
