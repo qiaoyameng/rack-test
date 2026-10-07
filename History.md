@@ -14,6 +14,10 @@
     body parameters in 307/308 redirects (Jeremy Evans)
 
 * Minor enhancements:
+  * Add `Rack::Test::Session#open_response`, which yields a
+    `Rack::Test::OpenResponse` with the status and headers as soon as the
+    app returns, allowing the response body to be consumed chunk by chunk
+    when testing streaming responses.
   * Add `Rack::Test::Session#default_input_content_type` and
     `#convert_input_hash_to_string` private methods to allow for
     easier overriding of default behavior. (Haruki Kobayashi #359)

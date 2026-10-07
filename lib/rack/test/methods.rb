@@ -9,7 +9,7 @@ module Rack
     # same context, and provides the Rack::Test API methods (see Rack::Test::Session
     # for their documentation). It defines the following methods that are delegated
     # to the current session: :request, :get, :post, :put, :patch, :delete, :options,
-    # :head, :custom_request, :follow_redirect!, :header, :env, :set_cookie,
+    # :head, :custom_request, :open_response, :follow_redirect!, :header, :env, :set_cookie,
     # :clear_cookies, :authorize, :basic_authorize, :last_response, and :last_request.
     #
     # Example:
@@ -75,6 +75,7 @@ module Rack
         :options,
         :head,
         :custom_request,
+        :open_response,
         :follow_redirect!,
         :header,
         :env,
