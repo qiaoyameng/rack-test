@@ -66,6 +66,17 @@ module Rack
         @options.key?('secure')
       end
 
+      # The SameSite attribute for the cookie as a symbol (:strict, :lax,
+      # or :none), or nil if the SameSite attribute was not set or the
+      # value was not recognized.
+      def same_site
+        case @options['samesite']&.downcase
+        when 'strict' then :strict
+        when 'lax' then :lax
+        when 'none' then :none
+        end
+      end
+
       # Whether the cookie has the httponly flag, indicating it is not available via
       # a javascript API.
       def http_only?
@@ -181,7 +192,11 @@ module Rack
       # Add a string of raw cookie information to the cookie jar,
       # if the cookie is valid for the given URI.
       # Cookies should be separated with a newline.
-      def merge(raw_cookies, uri = nil)
+      #
+      # If a Rack::Test::BrowserContext is given, cookies the browser
+      # would reject in that context (SameSite=None without Secure) are
+      # not added to the jar.
+      def merge(raw_cookies, uri = nil, context = nil)
         return unless raw_cookies
 
         raw_cookies = raw_cookies.split("\n") if raw_cookies.is_a? String
@@ -189,6 +204,7 @@ module Rack
         raw_cookies.each do |raw_cookie|
           next if raw_cookie.empty?
           cookie = Cookie.new(raw_cookie, uri, @default_host)
+          next if context && !context.acceptable_cookie?(cookie)
           self << cookie if cookie.valid?(uri)
         end
       end
@@ -205,11 +221,16 @@ module Rack
 
       # Return a raw cookie string for the cookie header to
       # use for the given URI.
-      def for(uri)
+      #
+      # If a Rack::Test::BrowserContext is given, only cookies the
+      # browser would send in that context are included, enforcing the
+      # SameSite Strict/Lax/None rules in addition to the standard
+      # Secure, Domain, and Path checks.
+      def for(uri, context = nil)
         buf = String.new
         delimiter = nil
 
-        each_cookie_for(uri) do |cookie|
+        each_cookie_for(uri, context) do |cookie|
           if delimiter
             buf << delimiter
           else
@@ -241,9 +262,11 @@ module Rack
       # the cookie can be sent to the current URI. It's added to the hash
       # so that when we are done, the cookies will be unique by name and
       # we'll have grabbed the most specific to the URI.
-      def each_cookie_for(uri)
+      def each_cookie_for(uri, context = nil)
         @cookies.each do |cookie|
-          yield cookie if !uri || cookie.matches?(uri)
+          next unless !uri || cookie.matches?(uri)
+          next if context && uri && !context.send_cookie?(cookie, uri)
+          yield cookie
         end
       end
     end

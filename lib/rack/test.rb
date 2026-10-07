@@ -21,6 +21,7 @@ end
 require 'forwardable'
 
 require_relative 'test/cookie_jar'
+require_relative 'test/browser_context'
 require_relative 'test/utils'
 require_relative 'test/methods'
 require_relative 'test/uploaded_file'
@@ -65,6 +66,17 @@ module Rack
 
       # The Rack::Test::CookieJar for the cookies for the current session.
       attr_accessor :cookie_jar
+
+      # The Rack::Test::BrowserContext used to enforce SameSite cookie
+      # rules for the session, or nil (the default) to disable SameSite
+      # enforcement and keep the legacy behavior of sending all cookies
+      # that match the request URI.
+      #
+      # The navigation context (top-level site, initiator site, and
+      # whether the request is a top-level navigation) is retained across
+      # redirects, while each request, including each redirect hop, is
+      # evaluated with its actual request method.
+      attr_accessor :browser_context
 
       # The default host used for the session for when using paths for URIs.
       attr_reader :default_host
@@ -370,19 +382,36 @@ module Rack
       # Submit the request with the given URI and rack environment to
       # the mock session.  Returns and potentially yields the last response.
       def process_request(uri, env)
-        env['HTTP_COOKIE'] ||= cookie_jar.for(uri)
+        context = browser_context_for(env)
+        env['HTTP_COOKIE'] ||= cookie_jar.for(uri, context)
         @last_request = Rack::Request.new(env)
         status, headers, body = @app.call(env).to_a
 
         @last_response = MockResponse.new(status, headers, body, env['rack.errors'].flush)
         close_body(body)
-        cookie_jar.merge(last_response.headers['set-cookie'], uri)
+        cookie_jar.merge(last_response.headers['set-cookie'], uri, context)
         @after_request.each(&:call)
         @last_response.finish
 
         yield @last_response if block_given?
 
         @last_response
+      end
+
+      # The browser context to use for a request with the request method
+      # in the given rack environment, or nil if SameSite enforcement is
+      # not enabled. Each request is evaluated with its actual request
+      # method, so redirect hops that change the method (such as a 303
+      # turning a POST into a GET) are handled like a browser.
+      def browser_context_for(env)
+        return unless @browser_context
+
+        method = env['REQUEST_METHOD'] || 'GET'
+        if @browser_context.method == method
+          @browser_context
+        else
+          @browser_context.with_method(method)
+        end
       end
 
       # Return the default content type to use when none is given.

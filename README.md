@@ -105,6 +105,33 @@ class TestApp < Test::Unit::TestCase
 end
 ```
 
+## SameSite cookie enforcement
+
+By default, the cookie jar only considers the request URI when deciding
+which cookies to send, so cross-site requests carry cookies a browser
+would withhold. To enforce the SameSite Strict/Lax/None sending rules,
+assign a `Rack::Test::BrowserContext` to the session:
+
+```ruby
+session = Rack::Test::Session.new(app)
+session.browser_context = Rack::Test::BrowserContext.new(
+  top_level_site: 'https://shop.example',   # site of the top-level document
+  initiator_site: 'https://ads.example',    # site that initiated the request
+  top_level_navigation: false,              # whether this is a top-level navigation
+  method: 'POST',                           # request method
+  default_same_site: :lax                   # required: policy for cookies without SameSite
+)
+```
+
+Sites are compared including their scheme, and registrable domains are
+computed by an injectable resolver (the `resolver:` keyword); the default
+resolver uses the last two labels of the host and does not download the
+public suffix list. The navigation context is retained across redirects,
+while each hop is evaluated with its actual request method. The standard
+Secure, Domain, and Path checks still apply, `SameSite=None` cookies
+without the `Secure` attribute are rejected, and sessions without a
+browser context keep the legacy behavior.
+
 ## Install
 
 To install the latest release as a gem:
