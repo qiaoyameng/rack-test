@@ -3,6 +3,8 @@
 require 'uri'
 require 'time'
 
+require_relative 'browser_context'
+
 module Rack
   module Test
     # Represents individual cookies in the cookie jar.  This is considered private
@@ -29,6 +31,9 @@ module Rack
 
         @name, @value = parse_query(@raw, ';').to_a.first
         @options = Hash[parse_query(options, ';').map { |k, v| [k.downcase, v] }]
+
+        @same_site = @options['samesite'] && @options['samesite'].downcase
+        @same_site = nil unless %w[strict lax none].include?(@same_site)
 
         if domain = @options['domain']
           @exact_domain_match = false
@@ -64,6 +69,11 @@ module Rack
       # an encrypted connection.
       def secure?
         @options.key?('secure')
+      end
+
+      # The SameSite attribute for the cookie.
+      def same_site
+        @same_site
       end
 
       # Whether the cookie has the httponly flag, indicating it is not available via
@@ -102,6 +112,11 @@ module Rack
         !expired? && valid?(uri) && uri.path.start_with?(path)
       end
 
+      # Whether the browser context allows sending this cookie to the URI.
+      def same_site_allowed?(browser_context, uri)
+        valid_same_site_none? && allowed_by_same_site?(browser_context, uri)
+      end
+
       # Order cookies by name, path, and domain.
       def <=>(other)
         [name, path, domain.reverse] <=> [other.name, other.path, other.domain.reverse]
@@ -121,6 +136,31 @@ module Rack
 
       private
 
+      def valid_same_site_none?
+        same_site != 'none' || secure?
+      end
+
+      def allowed_by_same_site?(browser_context, uri)
+        policy = same_site || browser_context.default_same_site
+
+        unless policy
+          raise ArgumentError,
+                'default SameSite policy must be configured for cookies without a SameSite attribute'
+        end
+
+        case policy.downcase
+        when 'strict'
+          browser_context.same_site_request?(browser_context.site_for(uri))
+        when 'lax'
+          browser_context.same_site_request?(browser_context.site_for(uri)) ||
+            browser_context.lax_navigation?
+        when 'none'
+          true
+        else
+          raise ArgumentError, "unsupported SameSite policy: #{policy.inspect}"
+        end
+      end
+
       # The default URI to use for the cookie, including just the host.
       def default_uri
         URI.parse('//' + @default_host + '/')
@@ -134,8 +174,12 @@ module Rack
     class CookieJar # :nodoc:
       DELIMITER = '; '.freeze
 
-      def initialize(cookies = [], default_host = DEFAULT_HOST)
+      def initialize(cookies = [], default_host = DEFAULT_HOST,
+                     default_same_site: nil,
+                     registrable_domain_resolver: RegistrableDomainResolver)
         @default_host = default_host
+        @default_same_site = default_same_site
+        @registrable_domain_resolver = registrable_domain_resolver
         @cookies = cookies.sort!
       end
 
@@ -181,7 +225,7 @@ module Rack
       # Add a string of raw cookie information to the cookie jar,
       # if the cookie is valid for the given URI.
       # Cookies should be separated with a newline.
-      def merge(raw_cookies, uri = nil)
+      def merge(raw_cookies, uri = nil, browser_context = nil)
         return unless raw_cookies
 
         raw_cookies = raw_cookies.split("\n") if raw_cookies.is_a? String
@@ -189,7 +233,10 @@ module Rack
         raw_cookies.each do |raw_cookie|
           next if raw_cookie.empty?
           cookie = Cookie.new(raw_cookie, uri, @default_host)
-          self << cookie if cookie.valid?(uri)
+          context = wrap_browser_context(browser_context)
+          valid = cookie.valid?(uri)
+          valid &&= cookie.send(:valid_same_site_none?) if context || @default_same_site
+          self << cookie if valid
         end
       end
 
@@ -205,11 +252,12 @@ module Rack
 
       # Return a raw cookie string for the cookie header to
       # use for the given URI.
-      def for(uri)
+      def for(uri, browser_context = nil)
         buf = String.new
         delimiter = nil
+        context = wrap_browser_context(browser_context)
 
-        each_cookie_for(uri) do |cookie|
+        each_cookie_for(uri, context) do |cookie|
           if delimiter
             buf << delimiter
           else
@@ -241,10 +289,24 @@ module Rack
       # the cookie can be sent to the current URI. It's added to the hash
       # so that when we are done, the cookies will be unique by name and
       # we'll have grabbed the most specific to the URI.
-      def each_cookie_for(uri)
+      def each_cookie_for(uri, browser_context = nil)
         @cookies.each do |cookie|
-          yield cookie if !uri || cookie.matches?(uri)
+          next unless !uri || cookie.matches?(uri)
+          next if browser_context && !cookie.same_site_allowed?(browser_context, uri)
+
+          yield cookie
         end
+      end
+
+      def wrap_browser_context(context)
+        return nil if context.nil?
+
+        BrowserContext.wrap(
+          context,
+          context.respond_to?(:request_method) ? context.request_method : nil,
+          @default_same_site,
+          @registrable_domain_resolver
+        )
       end
     end
   end

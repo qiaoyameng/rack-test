@@ -14,6 +14,9 @@
     body parameters in 307/308 redirects (Jeremy Evans)
 
 * Minor enhancements:
+  * Add optional browser cookie context for enforcing SameSite Strict,
+    Lax, and None sending rules, with an injectable registrable domain
+    resolver.
   * Add `Rack::Test::Session#default_input_content_type` and
     `#convert_input_hash_to_string` private methods to allow for
     easier overriding of default behavior. (Haruki Kobayashi #359)

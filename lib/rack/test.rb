@@ -20,6 +20,7 @@ end
 
 require 'forwardable'
 
+require_relative 'test/browser_context'
 require_relative 'test/cookie_jar'
 require_relative 'test/utils'
 require_relative 'test/methods'
@@ -54,12 +55,12 @@ module Rack
       extend Forwardable
       include Rack::Test::Utils
 
-      def self.new(app, default_host = DEFAULT_HOST) # :nodoc:
+      def self.new(app, default_host = DEFAULT_HOST, **options) # :nodoc:
         if app.is_a?(self)
           # Backwards compatibility for initializing with Rack::MockSession
           app
         else
-          super
+          super(app, default_host, **options)
         end
       end
 
@@ -96,13 +97,17 @@ module Rack
       # submitted in #last_request. The methods store a Rack::MockResponse based on the
       # response in #last_response. #last_response is also returned by the methods.
       # If a block is given, #last_response is also yielded to the block.
-      def initialize(app, default_host = DEFAULT_HOST)
+      def initialize(app, default_host = DEFAULT_HOST, default_same_site: nil,
+                     registrable_domain_resolver: RegistrableDomainResolver)
         @env = {}
         @app = app
         @after_request = []
         @default_host = default_host
+        @default_same_site = default_same_site
+        @registrable_domain_resolver = registrable_domain_resolver
         @last_request = nil
         @last_response = nil
+        @last_browser_context = nil
         clear_cookies
       end
 
@@ -121,12 +126,17 @@ module Rack
 
       # Replace the current cookie jar with an empty cookie jar.
       def clear_cookies
-        @cookie_jar = CookieJar.new([], @default_host)
+        @cookie_jar = CookieJar.new(
+          [],
+          @default_host,
+          default_same_site: @default_same_site,
+          registrable_domain_resolver: @registrable_domain_resolver
+        )
       end
 
       # Set a cookie in the current cookie jar.
       def set_cookie(cookie, uri = nil)
-        cookie_jar.merge(cookie, uri)
+        cookie_jar.merge(cookie, uri, @last_browser_context)
       end
 
       # Return the last request issued in the session. Raises an error if no
@@ -150,7 +160,7 @@ module Rack
       def request(uri, env = {}, &block)
         uri = parse_uri(uri, env)
         env = env_for(uri, env)
-        process_request(uri, env, &block)
+        process_request(uri, env, @browser_context_for_request, &block)
       end
 
       # Issue a request using the given HTTP verb for the given URI, with optional
@@ -160,7 +170,7 @@ module Rack
       def custom_request(verb, uri, params = {}, env = {}, &block)
         uri = parse_uri(uri, env)
         env = env_for(uri, env.merge(method: verb.to_s.upcase, params: params))
-        process_request(uri, env, &block)
+        process_request(uri, env, @browser_context_for_request, &block)
       end
 
       # Set a header to be included on all subsequent requests through the
@@ -211,12 +221,6 @@ module Rack
           raise Error, 'Last response was not a redirect. Cannot follow_redirect!'
         end
 
-        env = {
-          'HTTP_REFERER' => last_request.url,
-          'rack.session' => last_request.session,
-          'rack.session.options' => last_request.session_options
-        }
-
         params = {}
         case last_response.status
         when 307, 308
@@ -224,16 +228,30 @@ module Rack
           if (input = last_request.body)
             if input.respond_to?(:rewind)
               input.rewind
-              env[:input] = input
-              %w[CONTENT_TYPE CONTENT_LENGTH].each do |key|
-                env[key] = last_request.env[key] if last_request.env.key?(key)
-              end
+              env_input = input
             else
               params = last_request.POST
             end
           end
         else
           request_method = 'GET'
+        end
+
+        browser_context = @last_browser_context
+        browser_context = browser_context.for_request(request_method) if browser_context
+
+        env = {
+          'HTTP_REFERER' => last_request.url,
+          'rack.session' => last_request.session,
+          'rack.session.options' => last_request.session_options,
+          :browser_context => browser_context
+        }
+
+        if env_input
+          env[:input] = env_input
+          %w[CONTENT_TYPE CONTENT_LENGTH].each do |key|
+            env[key] = last_request.env[key] if last_request.env.key?(key)
+          end
         end
 
         # Compute the next location by appending the location header with the
@@ -255,6 +273,7 @@ module Rack
       def restore_state
         request = @last_request
         response = @last_response
+        browser_context = @last_browser_context
         cookie_jar = @cookie_jar.dup
         after_request = @after_request.dup
 
@@ -263,6 +282,7 @@ module Rack
         ensure
           @last_request = request
           @last_response = response
+          @last_browser_context = browser_context
           @cookie_jar = cookie_jar
           @after_request = after_request
         end
@@ -307,11 +327,15 @@ module Rack
       # Update environment to use based on given URI.
       def env_for(uri, env)
         env = DEFAULT_ENV.merge(@env).merge!(env)
+        request_method = env[:method] ? env[:method].to_s.upcase : 'GET'
+        context = env.delete(:browser_context)
+        context ||= env.delete('browser_context')
+        @browser_context_for_request = browser_context(context, request_method)
 
         env['HTTP_HOST'] ||= [uri.host, (uri.port if uri.port != uri.default_port)].compact.join(':')
         env['HTTPS'] = 'on' if URI::HTTPS === uri
         env['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest' if env[:xhr]
-        env['REQUEST_METHOD'] ||= env[:method] ? env[:method].to_s.upcase : 'GET'
+        env['REQUEST_METHOD'] ||= request_method
 
         params = env.delete(:params)
         query_array = [uri.query]
@@ -369,14 +393,15 @@ module Rack
 
       # Submit the request with the given URI and rack environment to
       # the mock session.  Returns and potentially yields the last response.
-      def process_request(uri, env)
-        env['HTTP_COOKIE'] ||= cookie_jar.for(uri)
+      def process_request(uri, env, browser_context = nil)
+        env['HTTP_COOKIE'] ||= cookie_jar.for(uri, browser_context)
         @last_request = Rack::Request.new(env)
+        @last_browser_context = browser_context
         status, headers, body = @app.call(env).to_a
 
         @last_response = MockResponse.new(status, headers, body, env['rack.errors'].flush)
         close_body(body)
-        cookie_jar.merge(last_response.headers['set-cookie'], uri)
+        cookie_jar.merge(last_response.headers['set-cookie'], uri, browser_context)
         @after_request.each(&:call)
         @last_response.finish
 
@@ -393,6 +418,18 @@ module Rack
       # Convert the given params hash into a request body string.
       def convert_input_hash_to_string(value, prefix = nil)
         build_nested_query(value, prefix)
+      end
+
+      def browser_context(context, request_method)
+        @browser_context_for_request = nil
+        return @browser_context_for_request if context.nil?
+
+        @browser_context_for_request = BrowserContext.wrap(
+          context,
+          request_method,
+          @default_same_site,
+          @registrable_domain_resolver
+        )
       end
     end
 
